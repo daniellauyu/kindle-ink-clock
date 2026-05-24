@@ -16,8 +16,15 @@ import clock as base
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 ICON_DIR = os.path.join(PROJECT_DIR, "assets", "icons", "meteocons", "png")
 ICON_SIZE = 42
+SUN_ICON_SIZE = 28
 ICON_X = 52
 ICON_GAP = 14
+SUNRISE_X = 438
+SUNSET_X = 580
+HEADER_RIGHT_PADDING = 60
+SUN_TIME_GAP = 4
+SUN_GROUP_GAP = 24
+MIN_HEADER_GROUP_GAP = 10
 
 WEATHER_ICON_RULES = [
     ("thunderstorms", ("雷", "电", "闪")),
@@ -67,20 +74,79 @@ def _load_icon_mask(icon_key, size=ICON_SIZE):
     return icon.getchannel("A")
 
 
+def measure_weather_header_layout(draw, wtext, sunrise, sunset, font):
+    tw, th, tb = base._text_size(draw, wtext, font)
+    text_x = ICON_X + ICON_SIZE + ICON_GAP
+    text_right = text_x + tw
+
+    sr_w = ss_w = 0
+    if sunrise:
+        sr_w, _, _ = base._text_size(draw, sunrise, font)
+    if sunset:
+        ss_w, _, _ = base._text_size(draw, sunset, font)
+
+    right_edge = base.SCREEN_W - HEADER_RIGHT_PADDING
+    sunset_icon_x = SUNSET_X
+    sunset_text_x = sunset_icon_x + SUN_ICON_SIZE + SUN_TIME_GAP
+    if sunset:
+        sunset_icon_x = right_edge - ss_w - SUN_TIME_GAP - SUN_ICON_SIZE
+        sunset_text_x = sunset_icon_x + SUN_ICON_SIZE + SUN_TIME_GAP
+
+    sunrise_icon_x = SUNRISE_X
+    sunrise_text_x = sunrise_icon_x + SUN_ICON_SIZE + SUN_TIME_GAP
+    if sunrise:
+        sunrise_width = SUN_ICON_SIZE + SUN_TIME_GAP + sr_w
+        if sunset:
+            sunrise_icon_x = sunset_icon_x - SUN_GROUP_GAP - sunrise_width
+        else:
+            sunrise_icon_x = right_edge - sunrise_width
+        sunrise_text_x = sunrise_icon_x + SUN_ICON_SIZE + SUN_TIME_GAP
+
+    min_sunrise_x = text_right + MIN_HEADER_GROUP_GAP
+    if sunrise and sunrise_icon_x < min_sunrise_x:
+        shift = min_sunrise_x - sunrise_icon_x
+        sunrise_icon_x += shift
+        sunrise_text_x += shift
+        if sunset:
+            sunset_icon_x += shift
+            sunset_text_x += shift
+
+    return {
+        "weather_text_x": text_x,
+        "weather_text_right": text_right,
+        "weather_text_height": th,
+        "weather_text_bbox": tb,
+        "sunrise_icon_x": sunrise_icon_x,
+        "sunrise_text_x": sunrise_text_x,
+        "sunset_icon_x": sunset_icon_x,
+        "sunset_text_x": sunset_text_x,
+    }
+
+
 def draw_weather_header(img, draw, y, weather, font):
     wtext = weather.get("text", f"{base.CITY_CN}  天气暂不可用")
     sr, ss = weather.get("sunrise", ""), weather.get("sunset", "")
-    top_line = f"{wtext}    ↑{sr}  ↓{ss}" if (sr and ss) else wtext
 
     icon_key = select_weather_icon_key(wtext)
     icon_mask = _load_icon_mask(icon_key)
     icon_y = y - 4
     img.paste(0, (ICON_X, icon_y), icon_mask)
 
-    tw, th, tb = base._text_size(draw, top_line, font)
-    text_x = ICON_X + ICON_SIZE + ICON_GAP
+    layout = measure_weather_header_layout(draw, wtext, sr, ss, font)
+    th = layout["weather_text_height"]
+    tb = layout["weather_text_bbox"]
     text_y = y + (ICON_SIZE - th) // 2 - tb[1] - 4
-    draw.text((text_x, text_y), top_line, fill=80, font=font)
+    draw.text((layout["weather_text_x"], text_y), wtext, fill=80, font=font)
+
+    time_y = text_y
+    if sr:
+        sunrise_mask = _load_icon_mask("sunrise", SUN_ICON_SIZE)
+        img.paste(0, (round(layout["sunrise_icon_x"]), y + 3), sunrise_mask)
+        draw.text((round(layout["sunrise_text_x"]), time_y), sr, fill=80, font=font)
+    if ss:
+        sunset_mask = _load_icon_mask("sunset", SUN_ICON_SIZE)
+        img.paste(0, (round(layout["sunset_icon_x"]), y + 3), sunset_mask)
+        draw.text((round(layout["sunset_text_x"]), time_y), ss, fill=80, font=font)
 
 
 def render(weather, out_path="/tmp/clock.png"):

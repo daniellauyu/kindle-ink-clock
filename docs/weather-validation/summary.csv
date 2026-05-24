@@ -1,0 +1,8 @@
+index,weather_text,expected_icon,selected_icon,text_width_px,text_right_px,sunrise_icon_x_px,gap_to_sunrise_px,full_image,header_image
+1,深圳  晴  27~32℃,clear-day,clear-day,269,377,442,65,01-clear-day-深圳-晴-27-32.png,01-clear-day-深圳-晴-27-32-header.png
+2,深圳  多云  27~32℃,partly-cloudy-day,partly-cloudy-day,303,411,442,31,02-partly-cloudy-day-深圳-多云-27-32.png,02-partly-cloudy-day-深圳-多云-27-32-header.png
+3,深圳  阴  27~32℃,cloudy,cloudy,269,377,442,65,03-cloudy-深圳-阴-27-32.png,03-cloudy-深圳-阴-27-32-header.png
+4,深圳  小雨  27~32℃,rain,rain,303,411,442,31,04-rain-深圳-小雨-27-32.png,04-rain-深圳-小雨-27-32-header.png
+5,深圳  雷阵雨  27~32℃,thunderstorms,thunderstorms,336,444,454,10,05-thunderstorms-深圳-雷阵雨-27-32.png,05-thunderstorms-深圳-雷阵雨-27-32-header.png
+6,深圳  小雪  0~2℃,snow,snow,269,377,442,65,06-snow-深圳-小雪-0-2.png,06-snow-深圳-小雪-0-2-header.png
+7,深圳  雾  18~20℃,fog,fog,269,377,442,65,07-fog-深圳-雾-18-20.png,07-fog-深圳-雾-18-20-header.png
