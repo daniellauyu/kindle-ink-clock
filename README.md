@@ -11,8 +11,7 @@
 - 日期 + 星期 + 农历（本地计算，无需联网）+ 当日节气
 - 本月日历（今天加框、节假日灰底显示名称、节气小字标注、补班标"班"）
 - 底部老黄历宜/忌
-- 每 6 小时联网同步天气 + NTP 校时，天气刷新同步更新老黄历（每日一次）
-- 法定节假日从 iCloud ICS 订阅获取，30 天缓存一次
+- Kindle 端按刷新档位联网同步天气，并顺带按缓存策略刷新节假日和老黄历
 - 防锁屏，持续运行
 
 ## 界面布局
@@ -36,6 +35,8 @@
    扫舍  入殓
 忌  搬家  结婚  入宅  领证  出行  作灶
    旅游  赴任
+─────────────────────────────────
+        今年第144天   第21周   端午节还有26天
 ```
 
 ## 适用设备
@@ -47,11 +48,11 @@
 
 | 数据 | 来源 | 刷新频率 |
 |------|------|---------|
-| 天气 | [tianqi.com](https://www.tianqi.com/) HTML 抓取 | 每天 4 次（0/6/12/18 时） |
+| 天气 | [tianqi.com](https://www.tianqi.com/) HTML 抓取 | 当前时刻进入 0/6/12/18 刷新档位，每天 4 次 |
 | 农历 | 本地算法（春节查表 + 朔望近似） | 无需联网 |
 | 节气 | 本地公式（21 世纪精度 ±1 天） | 无需联网 |
-| 法定节假日 | [iCloud 中国节假日 ICS](https://calendars.icloud.com/holidays/cn_zh.ics/) | 30 天一次 |
-| 老黄历宜/忌 | [wannianli.tianqi.com](https://wannianli.tianqi.com/) HTML 抓取 | 每天一次 |
+| 法定节假日 | [iCloud 中国节假日 ICS](https://calendars.icloud.com/holidays/cn_zh.ics/) | 天气刷新时顺带检查，缓存超 30 天才重拉 |
+| 老黄历宜/忌 | [wannianli.tianqi.com](https://wannianli.tianqi.com/) HTML 抓取 | 天气刷新时顺带检查，缓存日期不是今天才重拉 |
 
 ## 依赖
 
@@ -74,12 +75,13 @@
 ```python
 CITY_CN      = "深圳"     # 显示城市名
 CITY_SLUG    = "shenzhen" # tianqi.com 城市路径
-DEBUG_MODE   = True        # True: 有缓存就不重新抓取（调试用）
+DEBUG_MODE   = False       # Kindle 生产环境保持 False；本机调试可设 True
+TOP_SAFE_Y   = 34         # 顶部安全距离，避开 Kindle 系统状态栏
 FONT_PATH    = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
-REFRESH_HOURS = {0, 6, 12, 18}  # 每天天气刷新时刻
+REFRESH_HOURS = {0, 6, 12, 18}  # Kindle 端天气刷新整点
 ```
 
-> 部署到 Kindle 前将 `DEBUG_MODE` 改为 `False`。
+> `preview.py` 会把 `DEBUG_MODE` 设为 `True`，本机预览默认只读缓存；需要联网调试时显式使用 `--fetch` / `--fetch-almanac`。
 
 ### 3. 本地预览（Mac）
 
@@ -107,15 +109,38 @@ python3 preview.py --time 14:32
 ### 4. 部署到 Kindle
 
 ```bash
-# 先在 Kindle 搜索栏输入 ;uzb 并用 USB 连接
+# 步骤一：在 Kindle 搜索栏输入 ;uzb，激活 USB 传输模式
+# 步骤二：USB 连接 Mac，等待挂载为 /Volumes/Kindle
+# 步骤三：在项目目录执行
 ./deploy.sh
+# 步骤四：安全弹出 Kindle（Finder → 推出，或命令行 diskutil eject /Volumes/Kindle）
 ```
+
+`deploy.sh` 会自动同步以下文件：
+
+| 文件 | 目标路径 |
+|------|---------|
+| `clock.py` | `/Volumes/Kindle/extensions/clock/` |
+| `config.xml` | `/Volumes/Kindle/extensions/clock/` |
+| `menu.json` | `/Volumes/Kindle/extensions/clock/` |
+| `start.sh` | `/Volumes/Kindle/extensions/clock/` |
+| `fonts/MapleMono-NF-CN-Bold.ttf` | `/Volumes/Kindle/fonts/` |
 
 ### 5. 启动时钟
 
-在 Kindle 上：KUAL → Clock → **启动时钟（首次/联网）**
+**首次启动（需 WiFi）：**
 
-> 首次启动需开启 WiFi，脚本会自动安装 Pillow（约 1–2 分钟）。
+1. Kindle 开启 WiFi（设置 → 无线网络）
+2. KUAL → Clock → **启动时钟（首次/联网）**
+3. 屏幕显示 `Installing Pillow...`，等待约 1–2 分钟
+4. Pillow 安装完成后自动渲染时钟，之后每次启动无需 WiFi
+
+**后续更新代码后重启时钟：**
+
+1. KUAL → Clock → **停止时钟**
+2. KUAL → Clock → **启动时钟（首次/联网）**
+
+> 排查问题：通过 `;uzb` 挂载 Kindle 后查看 `/extensions/clock/clock.log`
 
 ## 项目结构
 

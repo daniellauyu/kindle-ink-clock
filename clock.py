@@ -8,14 +8,15 @@ import subprocess, datetime, calendar, time, json, os, sys, traceback, math, re
 # ── 可配置项 ────────────────────────────────────────────
 CITY_CN       = "深圳"
 CITY_SLUG     = "shenzhen"
-DEBUG_MODE    = True              # True: 首次抓取后只用缓存，调试时避免被封
+DEBUG_MODE    = False             # True: 本机调试时有缓存就不主动抓取
 WEATHER_CACHE = "/tmp/weather_cache.json"
 SCREEN_W      = 758
 SCREEN_H      = 1024
+TOP_SAFE_Y    = 34                # 避开 Kindle 顶部系统状态栏
 FONT_PATH     = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
 LOG_FILE      = "/mnt/us/extensions/clock/clock.log"
 WEEKDAYS      = ["一", "二", "三", "四", "五", "六", "日"]
-REFRESH_HOURS = {0, 6, 12, 18}   # 每天仅在这些整点抓取天气
+REFRESH_HOURS = {0, 6, 12, 18}   # Kindle 端天气刷新整点
 
 # ── 农历（本地计算，无需联网） ───────────────────────────
 _STEMS    = "甲乙丙丁戊己庚辛壬癸"
@@ -454,13 +455,18 @@ def fetch_weather(verbose=False):
     return cache
 
 def load_weather():
+    default = {"text": f"{CITY_CN}  天气暂不可用", "sunrise": "",
+               "sunset": "", "severe": False, "warning": ""}
     if os.path.exists(WEATHER_CACHE):
         try:
-            return json.load(open(WEATHER_CACHE))
+            data = json.load(open(WEATHER_CACHE))
+            if isinstance(data, dict):
+                merged = default.copy()
+                merged.update(data)
+                return merged
         except Exception:
             pass
-    return {"text": f"{CITY_CN}  天气暂不可用", "sunrise": "",
-            "sunset": "", "severe": False, "warning": ""}
+    return default
 
 def maybe_refresh_weather(now, last_slot):
     slot = _current_slot(now)
@@ -526,37 +532,89 @@ def draw_almanac_section(draw, y, title, items, font, max_w):
 
     left_x = 30
     right_x = left_x + max_w
-    marker = 30
-    gap = 8
+    marker = 44
+    gap = 7
     row_gap = 8
-    pill_h = 26
+    pill_h = 30
     pill_pad_x = 12
-    tag_x0 = left_x + marker + 12
-    x = tag_x0
-    row_y = y
-
-    draw.ellipse([left_x, row_y, left_x + marker, row_y + marker],
-                 outline=0, width=2)
-    tw, th, tb = _text_size(draw, title, font)
-    draw.text((left_x + (marker - tw) // 2 - tb[0],
-               row_y + (marker - th) // 2 - tb[1]),
-              title, fill=0, font=font)
-
+    tag_x0 = left_x + marker + 14
+    rows = []
+    row = []
+    row_w = 0
     for item in items:
         tw, th, tb = _text_size(draw, item, font)
         pill_w = tw + pill_pad_x * 2
-        if x > tag_x0 and x + pill_w > right_x:
-            x = tag_x0
-            row_y += pill_h + row_gap
+        next_w = pill_w if not row else row_w + gap + pill_w
+        if row and tag_x0 + next_w > right_x:
+            rows.append(row)
+            row = []
+            row_w = 0
+        row.append((item, pill_w, th, tb))
+        row_w = pill_w if row_w == 0 else row_w + gap + pill_w
+    if row:
+        rows.append(row)
 
-        _draw_round_rect(draw, [x, row_y, x + pill_w, row_y + pill_h],
-                         radius=pill_h // 2, outline=0, fill=255, width=1)
-        draw.text((x + pill_pad_x - tb[0],
-                   row_y + (pill_h - th) // 2 - tb[1]),
-                  item, fill=40, font=font)
-        x += pill_w + gap
+    block_h = len(rows) * pill_h + max(0, len(rows) - 1) * row_gap
+    marker_y = y + max(0, (block_h - marker) // 2)
+    draw.ellipse([left_x, marker_y, left_x + marker, marker_y + marker],
+                 outline=0, width=2)
+    tw, th, tb = _text_size(draw, title, font)
+    draw.text((left_x + (marker - tw) // 2 - tb[0],
+               marker_y + (marker - th) // 2 - tb[1]),
+              title, fill=0, font=font)
 
-    return row_y + pill_h + 10
+    row_y = y
+    for row in rows:
+        x = tag_x0
+        for item, pill_w, th, tb in row:
+            _draw_round_rect(draw, [x, row_y, x + pill_w, row_y + pill_h],
+                             radius=pill_h // 2, outline=0, fill=255, width=1)
+            draw.text((x + pill_pad_x - tb[0],
+                       row_y + (pill_h - th) // 2 - tb[1]),
+                      item, fill=40, font=font)
+            x += pill_w + gap
+
+        row_y += pill_h + row_gap
+
+    return y + block_h + 12
+
+def _next_holiday_summary(gdate):
+    future = []
+    for key, name in HOLIDAYS.items():
+        if key in WORKDAY_OVERRIDES:
+            continue
+        hdate = datetime.date(*key)
+        if hdate == gdate:
+            return name
+        if hdate > gdate:
+            future.append((hdate, name))
+
+    if not future:
+        return ""
+
+    hdate, name = min(future, key=lambda x: x[0])
+    return f"{name}还有{(hdate - gdate).days}天"
+
+def draw_today_summary(draw, y, now, font, max_w):
+    gdate = now.date()
+    parts = [
+        f"今年第{gdate.timetuple().tm_yday}天",
+        f"第{gdate.isocalendar().week}周",
+    ]
+    holiday = _next_holiday_summary(gdate)
+    if holiday:
+        parts.append(holiday)
+
+    text = "   ".join(parts)
+    x = 30
+    h = 38
+    _draw_round_rect(draw, [x, y, x + max_w, y + h],
+                     radius=6, outline=160, fill=255, width=1)
+    tw, th, tb = _text_size(draw, text, font)
+    draw.text((x + (max_w - tw) // 2 - tb[0],
+               y + (h - th) // 2 - tb[1]),
+              text, fill=60, font=font)
+    return y + h
 
 # ── 日历绘制 ────────────────────────────────────────────
 def draw_centered(draw, y, text, font, fill=0):
@@ -570,7 +628,7 @@ def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
     year, month, today = now.year, now.month, now.day
     cal    = calendar.monthcalendar(year, month)
     cell_w = SCREEN_W // 7
-    cell_h = 60   # 日期数字 + 下方标签行
+    cell_h = 64   # 日期数字 + 下方标签行
 
     # 星期表头
     y = top_y
@@ -640,14 +698,15 @@ def render(weather, out_path="/tmp/clock.png"):
     ft   = ImageFont.truetype(FONT_PATH, 155)   # 时间
     fd   = ImageFont.truetype(FONT_PATH, 50)    # 日期
     fw   = ImageFont.truetype(FONT_PATH, 36)    # 星期 + 农历
-    fnum = ImageFont.truetype(FONT_PATH, 32)    # 日历数字
+    fnum = ImageFont.truetype(FONT_PATH, 34)    # 日历数字
     fhdr = ImageFont.truetype(FONT_PATH, 30)    # 日历标题/表头
     flbl = ImageFont.truetype(FONT_PATH, 16)    # 节假日/节气标签
     fwth = ImageFont.truetype(FONT_PATH, 24)    # 天气（顶部小字）
-    falm = ImageFont.truetype(FONT_PATH, 18)    # 老黄历
+    falm = ImageFont.truetype(FONT_PATH, 20)    # 老黄历
+    fsum = ImageFont.truetype(FONT_PATH, 22)    # 今日摘要
 
     # ── 顶部天气（小字）─────────────────────────────────
-    y = 10
+    y = TOP_SAFE_Y
     wtext    = weather.get("text", f"{CITY_CN}  天气暂不可用")
     sr, ss   = weather.get("sunrise", ""), weather.get("sunset", "")
     top_line = f"{wtext}    ↑{sr}  ↓{ss}" if (sr and ss) else wtext
@@ -680,6 +739,10 @@ def render(weather, out_path="/tmp/clock.png"):
     max_w = SCREEN_W - 60
     y = draw_almanac_section(draw, y, "宜", almanac.get("yi", []), falm, max_w)
     y = draw_almanac_section(draw, y + 2, "忌", almanac.get("ji", []), falm, max_w)
+
+    # ── 今日摘要：靠近底部，给整屏做视觉收口 ───────────────
+    y = max(y + 14, SCREEN_H - 82)
+    y = draw_today_summary(draw, y, now, fsum, max_w)
 
     if weather.get("warning"):
         draw_centered(draw, y + 4, weather["warning"], fwth, fill=40)

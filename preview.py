@@ -15,7 +15,7 @@ sys.path.insert(0, PROJECT_DIR)
 import clock
 clock.FONT_PATH  = os.path.join(PROJECT_DIR, "fonts", "MapleMono-NF-CN-Bold.ttf")
 clock.LOG_FILE   = "/tmp/kindle_clock_preview.log"
-clock.DEBUG_MODE = False  # preview 时不走 DEBUG 逻辑
+clock.DEBUG_MODE = True  # 本机预览默认只读缓存，显式 --fetch 才联网抓取
 
 OUT = "/tmp/kindle_preview.png"
 
