@@ -507,18 +507,30 @@ def maybe_refresh_weather(now, last_slot):
         return load_weather(), slot
     if last_slot == slot:
         return load_weather(), last_slot
+
+    wifi_on()
+    sync_time()
+
+    ok = False
     try:
-        wifi_on()
-        sync_time()
         w = fetch_weather()
-        maybe_refresh_holidays()
-        maybe_refresh_almanac()
-        wifi_off()
-        return w, slot
+        ok = True
     except Exception as e:
         log(f"weather error: {e}")
-        wifi_off()
-        return load_weather(), slot
+
+    try:
+        maybe_refresh_holidays()
+    except Exception as e:
+        log(f"holiday refresh error: {e}")
+
+    try:
+        maybe_refresh_almanac()
+    except Exception as e:
+        log(f"almanac refresh error: {e}")
+
+    wifi_off()
+    # 天气失败时不推进 slot，下次循环继续重试
+    return load_weather(), (slot if ok else last_slot)
 
 # ── 老黄历排版 ──────────────────────────────────────────
 def _text_size(draw, text, font):
