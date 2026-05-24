@@ -15,8 +15,9 @@ SCREEN_H      = 1024
 TOP_SAFE_Y    = 34                # 避开 Kindle 顶部系统状态栏
 FONT_PATH     = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
 LOG_FILE      = "/mnt/us/extensions/clock/clock.log"
-WEEKDAYS      = ["一", "二", "三", "四", "五", "六", "日"]
-REFRESH_HOURS = {0, 6, 12, 18}   # Kindle 端天气刷新整点
+WEEKDAYS         = ["一", "二", "三", "四", "五", "六", "日"]
+REFRESH_HOURS    = {6, 12, 18}      # Kindle 端天气刷新整点（夜间不联网）
+BACKLIGHT_PATH   = "/sys/class/backlight/max77696-bl/brightness"
 
 # ── 农历（本地计算，无需联网） ───────────────────────────
 _STEMS    = "甲乙丙丁戊己庚辛壬癸"
@@ -312,13 +313,22 @@ def fetch_almanac(target_date=None, verbose=False):
         json.dump(cache, f, ensure_ascii=False)
     return cache
 
+_almanac_mem = {"date": "", "yi": [], "ji": []}
+
 def load_almanac():
+    global _almanac_mem
+    today = str(local_now().date())
+    if _almanac_mem["date"] == today:
+        return _almanac_mem
     if os.path.exists(ALMANAC_CACHE):
         try:
-            return json.load(open(ALMANAC_CACHE))
+            data = json.load(open(ALMANAC_CACHE))
+            if isinstance(data, dict):
+                _almanac_mem = data
+                return _almanac_mem
         except Exception:
             pass
-    return {"date": "", "yi": [], "ji": []}
+    return _almanac_mem
 
 def maybe_refresh_almanac():
     """日期变化时重新抓取（调用前 WiFi 已开启）。"""
@@ -327,6 +337,8 @@ def maybe_refresh_almanac():
         return
     try:
         fetch_almanac()
+        _almanac_mem.clear()   # 强制下次 load_almanac 重读文件
+        _almanac_mem.update({"date": "", "yi": [], "ji": []})
     except Exception as e:
         log(f"almanac refresh failed: {e}")
 
@@ -338,6 +350,18 @@ def log(msg):
     try:
         with open(LOG_FILE, "a") as f:
             f.write(f"[{local_now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
+
+def _trim_log(max_lines=200):
+    try:
+        if not os.path.exists(LOG_FILE):
+            return
+        with open(LOG_FILE) as f:
+            lines = f.readlines()
+        if len(lines) > max_lines:
+            with open(LOG_FILE, "w") as f:
+                f.writelines(lines[-max_lines:])
     except Exception:
         pass
 
@@ -355,7 +379,7 @@ def display_image(path):
 def wifi_on():
     subprocess.run(["lipc-set-prop", "com.lab126.wifid", "enable", "1"],
                    capture_output=True)
-    time.sleep(5)
+    time.sleep(3)
 
 def wifi_off():
     subprocess.run(["lipc-set-prop", "com.lab126.wifid", "enable", "0"],
@@ -367,6 +391,14 @@ def sync_time():
 def prevent_sleep():
     subprocess.run(["lipc-set-prop", "com.lab126.powerd", "preventScreenSaver", "1"],
                    capture_output=True)
+
+def apply_backlight():
+    """全天关闭背光，e-ink 无需背光即可阅读。"""
+    try:
+        with open(BACKLIGHT_PATH, "w") as f:
+            f.write("0")
+    except Exception as e:
+        log(f"backlight off failed: {e}")
 
 # ── 天气（抓取 tianqi.com） ──────────────────────────────
 def _current_slot(now):
@@ -710,24 +742,44 @@ def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
 
     return y
 
+# ── 字体缓存（进程内只加载一次，避免每分钟重复读 TTF） ────────
+_FONTS = {}
+
+def _load_fonts():
+    if not _FONTS:
+        from PIL import ImageFont
+        _FONTS.update({
+            'ft':   ImageFont.truetype(FONT_PATH, 155),
+            'fd':   ImageFont.truetype(FONT_PATH, 50),
+            'fw':   ImageFont.truetype(FONT_PATH, 36),
+            'fnum': ImageFont.truetype(FONT_PATH, 34),
+            'fhdr': ImageFont.truetype(FONT_PATH, 30),
+            'flbl': ImageFont.truetype(FONT_PATH, 16),
+            'fwth': ImageFont.truetype(FONT_PATH, 28),
+            'falm': ImageFont.truetype(FONT_PATH, 22),
+            'fsum': ImageFont.truetype(FONT_PATH, 28),
+        })
+    return _FONTS
+
 # ── 渲染 ────────────────────────────────────────────────
 def render(weather, out_path="/tmp/clock.png"):
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw
 
     now     = local_now()
     almanac = load_almanac()
     img     = Image.new("L", (SCREEN_W, SCREEN_H), 255)
     draw    = ImageDraw.Draw(img)
 
-    ft   = ImageFont.truetype(FONT_PATH, 155)   # 时间
-    fd   = ImageFont.truetype(FONT_PATH, 50)    # 日期
-    fw   = ImageFont.truetype(FONT_PATH, 36)    # 星期 + 农历
-    fnum = ImageFont.truetype(FONT_PATH, 34)    # 日历数字
-    fhdr = ImageFont.truetype(FONT_PATH, 30)    # 日历标题/表头
-    flbl = ImageFont.truetype(FONT_PATH, 16)    # 节假日/节气标签
-    fwth = ImageFont.truetype(FONT_PATH, 28)    # 天气（顶部小字）
-    falm = ImageFont.truetype(FONT_PATH, 22)    # 老黄历
-    fsum = ImageFont.truetype(FONT_PATH, 28)    # 今日摘要
+    fonts = _load_fonts()
+    ft   = fonts['ft']
+    fd   = fonts['fd']
+    fw   = fonts['fw']
+    fnum = fonts['fnum']
+    fhdr = fonts['fhdr']
+    flbl = fonts['flbl']
+    fwth = fonts['fwth']
+    falm = fonts['falm']
+    fsum = fonts['fsum']
 
     # ── 顶部天气（小字）─────────────────────────────────
     y = TOP_SAFE_Y
@@ -776,7 +828,7 @@ def render(weather, out_path="/tmp/clock.png"):
     if weather.get("warning"):
         draw_centered(draw, y + 4, weather["warning"], fwth, fill=40)
 
-    img.save(out_path)
+    img.save(out_path, compress_level=1)
     return img
 
 # ── 主循环 ───────────────────────────────────────────────
@@ -805,24 +857,34 @@ def main():
             eips_msg("Pillow import failed.", str(e)[:40])
             sys.exit(1)
 
+    _trim_log()
     load_holidays()
     weather   = load_weather()
     last_slot = None
+    tick      = 0
+    apply_backlight()
     prevent_sleep()
 
     while True:
         try:
             now = local_now()
+            # 背光和防锁屏每 5 分钟维持一次，减少 subprocess 和 flash 写入
+            if tick % 5 == 0:
+                apply_backlight()
+                prevent_sleep()
             weather, last_slot = maybe_refresh_weather(now, last_slot)
             render(weather)
             display_image("/tmp/clock.png")
-            prevent_sleep()
+            tick += 1
         except Exception:
             log(f"loop error: {traceback.format_exc()}")
             time.sleep(10)
 
-        sleep_sec = 60 - local_now().second
-        time.sleep(max(sleep_sec, 1))
+        now2 = local_now()
+        if 0 <= now2.hour < 6:
+            time.sleep(5 * 60)   # 夜间 5 分钟刷一次，减少 eips 和 CPU 唤醒
+        else:
+            time.sleep(max(60 - now2.second, 1))
 
 if __name__ == "__main__":
     try:
