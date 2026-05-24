@@ -572,10 +572,8 @@ def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
     cell_w = SCREEN_W // 7
     cell_h = 60   # 日期数字 + 下方标签行
 
-    draw_centered(draw, top_y, f"{year} 年 {month} 月", font_hdr)
-    y = top_y + 44
-
     # 星期表头
+    y = top_y
     for i, wd in enumerate(WEEKDAYS):
         bb = draw.textbbox((0, 0), wd, font=font_hdr)
         tx = i * cell_w + (cell_w - (bb[2]-bb[0])) // 2 - bb[0]
