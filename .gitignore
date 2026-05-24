@@ -1,0 +1,17 @@
+# 字体文件（版权问题，不入库）
+fonts/*.ttf
+fonts/*.otf
+fonts/*.ttc
+
+# 本地预览输出
+*.png
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# 天气缓存
+weather_cache.json

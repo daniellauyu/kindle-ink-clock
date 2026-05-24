@@ -1,0 +1,12 @@
+{
+  "items": [
+    {
+      "name": "启动时钟（首次/联网）",
+      "action": "sh /mnt/us/extensions/clock/start.sh"
+    },
+    {
+      "name": "停止时钟",
+      "action": "killall python3.9 2>/dev/null; eips -c"
+    }
+  ]
+}
