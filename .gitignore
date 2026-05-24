@@ -6,6 +6,7 @@ fonts/*.ttc
 # 本地预览输出
 *.png
 !docs/preview.png
+!assets/**/*.png
 *.log
 
 # Python
