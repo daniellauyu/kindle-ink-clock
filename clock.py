@@ -21,6 +21,7 @@ REFRESH_HOURS = {0, 6, 12, 18}   # Kindle 端天气刷新整点
 # ── 农历（本地计算，无需联网） ───────────────────────────
 _STEMS    = "甲乙丙丁戊己庚辛壬癸"
 _BRANCHES = "子丑寅卯辰巳午未申酉戌亥"
+_ZODIACS  = "鼠牛虎兔龙蛇马羊猴鸡狗猪"
 _MONTH_NAMES = ["正","二","三","四","五","六","七","八","九","十","冬","腊"]
 _SYNODIC  = 29.53059   # 朔望月平均天数
 
@@ -123,7 +124,7 @@ def lunar_date_str(gdate):
 
     lday    = max(1, min(30, days - cur_start + 1))
     offset  = year - 1984
-    year_s  = _STEMS[offset % 10] + _BRANCHES[offset % 12] + "年"
+    year_s  = _STEMS[offset % 10] + _BRANCHES[offset % 12] + _ZODIACS[offset % 12] + "年"
     month_s = ("闰" if cur_leap else "") + _MONTH_NAMES[cur_m-1] + "月"
     return year_s + month_s + _lunar_day_str(lday)
 
@@ -534,8 +535,8 @@ def draw_almanac_section(draw, y, title, items, font, max_w):
     right_x = left_x + max_w
     marker = 44
     gap = 7
-    row_gap = 8
-    pill_h = 30
+    row_gap = 10
+    pill_h = 34
     pill_pad_x = 12
     tag_x0 = left_x + marker + 14
     rows = []
@@ -553,6 +554,7 @@ def draw_almanac_section(draw, y, title, items, font, max_w):
         row_w = pill_w if row_w == 0 else row_w + gap + pill_w
     if row:
         rows.append(row)
+    rows = rows[:2]  # 最多显示 2 行
 
     block_h = len(rows) * pill_h + max(0, len(rows) - 1) * row_gap
     marker_y = y + max(0, (block_h - marker) // 2)
@@ -577,6 +579,28 @@ def draw_almanac_section(draw, y, title, items, font, max_w):
         row_y += pill_h + row_gap
 
     return y + block_h + 12
+
+def _almanac_height(draw, items, font, max_w):
+    """预计算一组黄历标签的高度，与 draw_almanac_section 逻辑一致。"""
+    if not items:
+        return 0
+    pill_h, pill_pad_x, gap, row_gap = 34, 12, 7, 10
+    tag_x0 = 30 + 44 + 14
+    right_x = 30 + max_w
+    rows, row, row_w = [], [], 0
+    for item in items:
+        tw, th, tb = _text_size(draw, item, font)
+        pill_w = tw + pill_pad_x * 2
+        next_w = pill_w if not row else row_w + gap + pill_w
+        if row and tag_x0 + next_w > right_x:
+            rows.append(row); row = []; row_w = 0
+        row.append((item, pill_w, th, tb))
+        row_w = pill_w if row_w == 0 else row_w + gap + pill_w
+    if row:
+        rows.append(row)
+    rows = rows[:2]
+    block_h = len(rows) * pill_h + max(0, len(rows) - 1) * row_gap
+    return block_h + 12
 
 def _next_holiday_summary(gdate):
     future = []
@@ -607,7 +631,7 @@ def draw_today_summary(draw, y, now, font, max_w):
 
     text = "   ".join(parts)
     x = 30
-    h = 38
+    h = 52
     _draw_round_rect(draw, [x, y, x + max_w, y + h],
                      radius=6, outline=160, fill=255, width=1)
     tw, th, tb = _text_size(draw, text, font)
@@ -628,7 +652,7 @@ def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
     year, month, today = now.year, now.month, now.day
     cal    = calendar.monthcalendar(year, month)
     cell_w = SCREEN_W // 7
-    cell_h = 64   # 日期数字 + 下方标签行
+    cell_h = 56   # 日期数字 + 下方标签行
 
     # 星期表头
     y = top_y
@@ -658,12 +682,12 @@ def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
             gr = tx + bb[2]; gb = y + bb[3]
             pad = 4
 
-            if is_holiday:
-                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], fill=210)
             if is_today:
-                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], outline=0, width=2)
+                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], fill=0)
+            elif is_holiday:
+                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], fill=210)
 
-            draw.text((tx, y), ds, fill=0, font=font_num)
+            draw.text((tx, y), ds, fill=255 if is_today else 0, font=font_num)
 
             # 标签行：节假日名 > 补班"班" > 节气
             if is_holiday and hol_name:
@@ -701,9 +725,9 @@ def render(weather, out_path="/tmp/clock.png"):
     fnum = ImageFont.truetype(FONT_PATH, 34)    # 日历数字
     fhdr = ImageFont.truetype(FONT_PATH, 30)    # 日历标题/表头
     flbl = ImageFont.truetype(FONT_PATH, 16)    # 节假日/节气标签
-    fwth = ImageFont.truetype(FONT_PATH, 24)    # 天气（顶部小字）
-    falm = ImageFont.truetype(FONT_PATH, 20)    # 老黄历
-    fsum = ImageFont.truetype(FONT_PATH, 22)    # 今日摘要
+    fwth = ImageFont.truetype(FONT_PATH, 28)    # 天气（顶部小字）
+    falm = ImageFont.truetype(FONT_PATH, 22)    # 老黄历
+    fsum = ImageFont.truetype(FONT_PATH, 28)    # 今日摘要
 
     # ── 顶部天气（小字）─────────────────────────────────
     y = TOP_SAFE_Y
@@ -711,7 +735,7 @@ def render(weather, out_path="/tmp/clock.png"):
     sr, ss   = weather.get("sunrise", ""), weather.get("sunset", "")
     top_line = f"{wtext}    ↑{sr}  ↓{ss}" if (sr and ss) else wtext
     draw_centered(draw, y, top_line, fwth, fill=80)
-    y += 32
+    y += 38
     draw.line([(60, y), (SCREEN_W-60, y)], fill=180, width=1)
     y += 14
 
@@ -735,14 +759,19 @@ def render(weather, out_path="/tmp/clock.png"):
     y = draw_calendar(draw, y, now, fnum, fhdr, flbl);                   y += 8
     draw.line([(60, y), (SCREEN_W-60, y)], fill=160, width=1);           y += 14
 
-    # ── 老黄历 ───────────────────────────────────────────
-    max_w = SCREEN_W - 60
-    y = draw_almanac_section(draw, y, "宜", almanac.get("yi", []), falm, max_w)
-    y = draw_almanac_section(draw, y + 2, "忌", almanac.get("ji", []), falm, max_w)
+    # ── 老黄历：在日历分隔线与今日摘要之间垂直居中 ──────────
+    max_w  = SCREEN_W - 60
+    yi, ji = almanac.get("yi", []), almanac.get("ji", [])
+    h_yi   = _almanac_height(draw, yi, falm, max_w)
+    h_ji   = _almanac_height(draw, ji, falm, max_w)
+    alm_h  = h_yi + (8 + h_ji if h_yi and h_ji else h_ji)
+    y_sum  = SCREEN_H - TOP_SAFE_Y - 52
+    y_alm  = y + max(0, (y_sum - y - alm_h) // 2)
+    y2     = draw_almanac_section(draw, y_alm, "宜", yi, falm, max_w)
+    draw_almanac_section(draw, y2 + 8, "忌", ji, falm, max_w)
 
-    # ── 今日摘要：靠近底部，给整屏做视觉收口 ───────────────
-    y = max(y + 14, SCREEN_H - 82)
-    y = draw_today_summary(draw, y, now, fsum, max_w)
+    # ── 今日摘要：底部距屏幕边距与顶部天气一致 ──────────────
+    draw_today_summary(draw, y_sum, now, fsum, max_w)
 
     if weather.get("warning"):
         draw_centered(draw, y + 4, weather["warning"], fwth, fill=40)
