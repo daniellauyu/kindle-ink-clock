@@ -12,7 +12,7 @@
 - 本月日历（今天黑底白字反色、节假日灰底显示名称、节气小字标注、补班标"班"）
 - 老黄历宜/忌（最多 2 行，自动垂直居中于日历与摘要栏之间）
 - 底部摘要栏：今年第 N 天 / 第 N 周 / 下一个节假日倒计时
-- Kindle 端按刷新档位联网同步天气，并顺带按缓存策略刷新节假日和老黄历
+- 每天 6/12/18 时联网刷新天气，同步刷新节假日和老黄历；天气失败时黄历仍独立更新，并持续重试至成功
 - 全天强制关闭背光（e-ink 无需背光，最大化省电）
 - 夜间（0–6 点）屏幕每 5 分钟刷新一次，降低 CPU 和 e-ink 刷新功耗
 - 防锁屏，持续运行
@@ -51,7 +51,7 @@
 
 | 数据 | 来源 | 刷新频率 |
 |------|------|---------|
-| 天气 | [tianqi.com](https://www.tianqi.com/) HTML 抓取 | 当前时刻进入 0/6/12/18 刷新档位，每天 4 次 |
+| 天气 | [tianqi.com](https://www.tianqi.com/) HTML 抓取 | 每天 3 次：6/12/18 时（夜间 0–6 时不联网） |
 | 农历 | 本地算法（春节查表 + 朔望近似） | 无需联网 |
 | 节气 | 本地公式（21 世纪精度 ±1 天） | 无需联网 |
 | 法定节假日 | [iCloud 中国节假日 ICS](https://calendars.icloud.com/holidays/cn_zh.ics/) | 天气刷新时顺带检查，缓存超 30 天才重拉 |
@@ -82,10 +82,11 @@ DEBUG_MODE     = False       # Kindle 生产环境保持 False；本机调试可
 TOP_SAFE_Y     = 34         # 顶部安全距离，避开 Kindle 系统状态栏
 FONT_PATH      = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
 REFRESH_HOURS  = {6, 12, 18}     # 天气刷新整点（0 点不联网，减少夜间功耗）
-BACKLIGHT_PATH = "/sys/class/backlight/max77696-bl/brightness"  # KPW2 背光路径
-WEATHER_CACHE  = "/tmp/weather_cache.json"   # 可改为持久路径（重启后保留缓存）
-HOLIDAY_CACHE  = "/tmp/holiday_cache.json"
-ALMANAC_CACHE  = "/tmp/almanac_cache.json"
+BACKLIGHT_PATH   = "/sys/class/backlight/max77696-bl/brightness"  # KPW2 背光路径
+WEATHER_CACHE    = "/tmp/weather_cache.json"   # 可改为持久路径（重启后保留缓存）
+HOLIDAY_CACHE    = "/tmp/holiday_cache.json"
+ALMANAC_CACHE    = "/tmp/almanac_cache.json"
+HOLIDAY_TTL_DAYS = 30                          # 节假日缓存有效期（天）
 ```
 
 > `preview.py` 会把 `DEBUG_MODE` 设为 `True`，本机预览默认只读缓存；需要联网调试时显式使用 `--fetch` / `--fetch-almanac`。
@@ -159,6 +160,7 @@ kindle-ink-clock/
 ├── config.xml      # KUAL 扩展描述
 ├── menu.json       # KUAL 菜单
 ├── start.sh        # Kindle 端启动脚本（关背光 + nice -n 5 + 启动 clock.py）
+├── docs/           # 文档资源（preview.png 等）
 └── fonts/          # 放入字体文件（不入 git）
 ```
 
