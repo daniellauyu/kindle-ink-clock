@@ -218,7 +218,7 @@ def fetch_holidays(verbose=False):
 
     _p(f"[holidays] {len(hols)} holiday days, {len(wdays)} workday overrides")
     cache = {"holidays": hols, "workday_overrides": wdays,
-             "fetched": str(datetime.date.today())}
+             "fetched": str(local_now().date())}
     with open(HOLIDAY_CACHE, "w") as f:
         json.dump(cache, f, ensure_ascii=False)
     return cache
@@ -247,7 +247,7 @@ def load_holidays():
 
 def maybe_refresh_holidays():
     """缓存超过 TTL 则重新抓取（调用前 WiFi 应已开启）。"""
-    today = datetime.date.today()
+    today = local_now().date()
     if os.path.exists(HOLIDAY_CACHE):
         try:
             with open(HOLIDAY_CACHE) as f:
