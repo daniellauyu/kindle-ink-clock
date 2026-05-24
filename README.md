@@ -7,17 +7,52 @@
 ## 功能
 
 - 大号时间显示（HH:MM）
-- 日期 + 星期
-- 本月日历（今天加框高亮）
-- 实时天气 + 矢量天气图标（晴/多云/阴/雨/雪/雷/雾）
-- 极端天气自动预警徽章
-- 每 30 分钟联网同步天气 + NTP 校时，其余时间 WiFi 关闭省电
+- 顶部小字天气 + 日出/日落
+- 日期 + 星期 + 农历（本地计算，无需联网）+ 当日节气
+- 本月日历（今天加框、节假日灰底显示名称、节气小字标注、补班标"班"）
+- 底部老黄历宜/忌
+- 每 6 小时联网同步天气 + NTP 校时，天气刷新同步更新老黄历（每日一次）
+- 法定节假日从 iCloud ICS 订阅获取，30 天缓存一次
 - 防锁屏，持续运行
+
+## 界面布局
+
+```
+深圳  阴  27~32℃  ↑05:40  ↓19:00    ← 天气（小字）
+─────────────────────────────────
+            14:32                    ← 时间（大字）
+         2026年5月24日
+      星期日  丙午年四月初八
+─────────────────────────────────
+           2026 年 5 月
+   一   二   三   四   五   六   日
+              小满  5   6   7   8
+   9   10   11   12   13   14  [15]   ← 今天加框
+  16   17   18   19   20   21   22
+  春节 春节 春节 春节 春节 春节 春节   ← 节假日灰底+名称
+  23   24   25   26   27   28
+  春节                        班
+─────────────────────────────────
+宜  安葬  理发  破土  祭祀  解除  沐浴
+   扫舍  入殓
+忌  搬家  结婚  入宅  领证  出行  作灶
+   旅游  赴任
+```
 
 ## 适用设备
 
 已在 **Kindle Paperwhite 2（KPW2，固件 5.12.2.2）** 上验证。
-理论上适用于已越狱、安装了 Python3 的其他 Kindle 型号。
+理论上适用于已越狱、安装了 Python 3.9 的其他 Kindle 型号。
+
+## 数据来源
+
+| 数据 | 来源 | 刷新频率 |
+|------|------|---------|
+| 天气 | [tianqi.com](https://www.tianqi.com/) HTML 抓取 | 每天 4 次（0/6/12/18 时） |
+| 农历 | 本地算法（春节查表 + 朔望近似） | 无需联网 |
+| 节气 | 本地公式（21 世纪精度 ±1 天） | 无需联网 |
+| 法定节假日 | [iCloud 中国节假日 ICS](https://calendars.icloud.com/holidays/cn_zh.ics/) | 30 天一次 |
+| 老黄历宜/忌 | [wannianli.tianqi.com](https://wannianli.tianqi.com/) HTML 抓取 | 每天一次 |
 
 ## 依赖
 
@@ -38,13 +73,14 @@
 编辑 `clock.py` 顶部的可配置项：
 
 ```python
-LAT        = 22.5431   # 纬度
-LON        = 114.0579  # 经度
-CITY_CN    = "深圳"    # 显示城市名
-QWEATHER_KEY = ""      # 和风天气 Key（可选，用于气象预警）
-WEATHER_INTERVAL = 30  # 天气刷新间隔（分钟）
-FONT_PATH  = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
+CITY_CN      = "深圳"     # 显示城市名
+CITY_SLUG    = "shenzhen" # tianqi.com 城市路径
+DEBUG_MODE   = True        # True: 有缓存就不重新抓取（调试用）
+FONT_PATH    = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
+REFRESH_HOURS = {0, 6, 12, 18}  # 每天天气刷新时刻
 ```
+
+> 部署到 Kindle 前将 `DEBUG_MODE` 改为 `False`。
 
 ### 3. 本地预览（Mac）
 
@@ -52,14 +88,21 @@ FONT_PATH  = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
 # 安装依赖
 pip3 install pillow
 
-# 预览当前时间
+# 预览当前时间（使用缓存数据，无缓存显示模拟数据）
 python3 preview.py
 
-# 预览指定时间 + 天气
-python3 preview.py --time 14:32 --weather "深圳  28°C  多云" --icon partly_cloudy
+# 抓取真实天气并预览
+python3 preview.py --fetch
 
-# 预览极端天气预警
-python3 preview.py --icon thunder --weather "深圳  32°C  雷阵雨" --severe
+# 抓取节假日 ICS 并预览
+python3 preview.py --fetch-holidays
+
+# 抓取老黄历并预览
+python3 preview.py --fetch-almanac
+
+# 预览指定日期（测试节假日/节气显示）
+python3 preview.py --date 2026-02-16
+python3 preview.py --time 14:32
 ```
 
 ### 4. 部署到 Kindle
@@ -88,11 +131,13 @@ kindle-ink-clock/
 └── fonts/          # 放入字体文件（不入 git）
 ```
 
-## 天气数据
+## 缓存文件
 
-使用 [Open-Meteo](https://open-meteo.com/) — 完全免费、无需 API Key。
-
-可选配 [和风天气](https://dev.qweather.com/) 免费 Key，启用中国气象预警。
+| 文件 | 内容 | 位置 |
+|------|------|------|
+| `weather_cache.json` | 天气文本 + 日出日落 | `/tmp/` |
+| `holiday_cache.json` | 节假日 + 补班日 | `/tmp/` |
+| `almanac_cache.json` | 老黄历宜/忌 | `/tmp/` |
 
 ## 许可
 

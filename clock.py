@@ -1,10 +1,343 @@
 #!/usr/bin/env python3
-import subprocess, datetime, calendar, time, json, os, sys, traceback, math
+"""
+Kindle Ink Clock — 运行在越狱 Kindle 上的全屏 e-ink 桌面时钟
+部署路径: /mnt/us/extensions/clock/clock.py
+"""
+import subprocess, datetime, calendar, time, json, os, sys, traceback, math, re
 
-LOG_FILE = "/mnt/us/extensions/clock/clock.log"
+# ── 可配置项 ────────────────────────────────────────────
+CITY_CN       = "深圳"
+CITY_SLUG     = "shenzhen"
+DEBUG_MODE    = True              # True: 首次抓取后只用缓存，调试时避免被封
+WEATHER_CACHE = "/tmp/weather_cache.json"
+SCREEN_W      = 758
+SCREEN_H      = 1024
+FONT_PATH     = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
+LOG_FILE      = "/mnt/us/extensions/clock/clock.log"
+WEEKDAYS      = ["一", "二", "三", "四", "五", "六", "日"]
+REFRESH_HOURS = {0, 6, 12, 18}   # 每天仅在这些整点抓取天气
 
+# ── 农历（本地计算，无需联网） ───────────────────────────
+_STEMS    = "甲乙丙丁戊己庚辛壬癸"
+_BRANCHES = "子丑寅卯辰巳午未申酉戌亥"
+_MONTH_NAMES = ["正","二","三","四","五","六","七","八","九","十","冬","腊"]
+_SYNODIC  = 29.53059   # 朔望月平均天数
+
+# 正月初一（春节）公历日期，覆盖 2015-2036
+_SPRING = {
+    2015:(2,19),2016:(2,8), 2017:(1,28),2018:(2,16),2019:(2,5),
+    2020:(1,25),2021:(2,12),2022:(2,1), 2023:(1,22),2024:(2,10),
+    2025:(1,29),2026:(2,17),2027:(2,6), 2028:(1,26),2029:(2,13),
+    2030:(2,3), 2031:(1,23),2032:(2,11),2033:(1,31),2034:(2,19),
+    2035:(2,8), 2036:(1,28),
+}
+# 闰月：该年闰在第几月之后（0=无闰月）
+_LEAP = {
+    2020:4, 2023:2, 2025:6, 2033:11,
+}
+
+# 精确月份天数（朔望近似会在年末累积 ±1 天误差，此表优先使用）
+# 顺序与 months 列表一致：正月、二月、…、闰N月（若有）、…、腊月
+_MONTH_SIZES = {
+    2025: (30,29,30,29,29,30,29,29,30,30,30,30,29),
+    #      正  二  三  四  五  六 闰六 七  八  九  十 冬  腊
+}
+
+# ── 节气（21世纪公式，精度 ±1 天） ──────────────────────
+# (月份, C系数, 名称)
+_SOLAR_TERMS = [
+    (1,  5.4055, "小寒"), (1,  20.12,  "大寒"),
+    (2,  3.87,   "立春"), (2,  18.73,  "雨水"),
+    (3,  5.63,   "惊蛰"), (3,  20.646, "春分"),
+    (4,  4.81,   "清明"), (4,  20.1,   "谷雨"),
+    (5,  5.52,   "立夏"), (5,  21.04,  "小满"),
+    (6,  5.678,  "芒种"), (6,  21.37,  "夏至"),
+    (7,  7.108,  "小暑"), (7,  22.83,  "大暑"),
+    (8,  7.5,    "立秋"), (8,  23.13,  "处暑"),
+    (9,  7.646,  "白露"), (9,  23.042, "秋分"),
+    (10, 8.318,  "寒露"), (10, 23.438, "霜降"),
+    (11, 7.438,  "立冬"), (11, 22.36,  "小雪"),
+    (12, 7.18,   "大雪"), (12, 21.94,  "冬至"),
+]
+
+def solar_term(gdate):
+    """返回当天节气名称，无则返回空字符串。"""
+    Y = gdate.year % 100
+    for month, C, name in _SOLAR_TERMS:
+        day = int(Y * 0.2422 + C) - int(Y / 4)
+        if gdate.month == month and gdate.day == day:
+            return name
+    return ""
+
+def _lunar_day_str(d):
+    ones = ["","一","二","三","四","五","六","七","八","九","十"]
+    if d <= 10: return "初" + ones[d]
+    if d == 20: return "二十"
+    if d == 30: return "三十"
+    if d <= 19: return "十" + ones[d-10]
+    return "廿" + ones[d-20]
+
+def lunar_date_str(gdate):
+    """给定公历日期，返回农历字符串，如 '丙午年四月初八'。"""
+    year = gdate.year
+    if year not in _SPRING:
+        return ""
+    sm, sd = _SPRING[year]
+    sf = datetime.date(year, sm, sd)
+    if gdate < sf:
+        year -= 1
+        if year not in _SPRING:
+            return ""
+        sm, sd = _SPRING[year]
+        sf = datetime.date(year, sm, sd)
+
+    days   = (gdate - sf).days
+    leap_m = _LEAP.get(year, 0)
+
+    if year in _MONTH_SIZES:
+        # 使用精确月份天数，从春节累加朔日偏移
+        sizes = _MONTH_SIZES[year]
+        months, start, si = [], 0, 0
+        for m in range(1, 13):
+            months.append((m, False, start))
+            start += sizes[si]; si += 1
+            if m == leap_m:
+                months.append((m, True, start))
+                start += sizes[si]; si += 1
+    else:
+        # 朔望月近似（精度 ±1 天）
+        months, idx = [], 0
+        for m in range(1, 13):
+            months.append((m, False, round(idx * _SYNODIC)))
+            idx += 1
+            if m == leap_m:
+                months.append((m, True, round(idx * _SYNODIC)))
+                idx += 1
+
+    cur_m, cur_leap, cur_start = months[0]
+    for m_num, is_leap, start in months:
+        if start > days:
+            break
+        cur_m, cur_leap, cur_start = m_num, is_leap, start
+
+    lday    = max(1, min(30, days - cur_start + 1))
+    offset  = year - 1984
+    year_s  = _STEMS[offset % 10] + _BRANCHES[offset % 12] + "年"
+    month_s = ("闰" if cur_leap else "") + _MONTH_NAMES[cur_m-1] + "月"
+    return year_s + month_s + _lunar_day_str(lday)
+
+# ── 大陆法定节假日（从 iCloud ICS 获取，下方为兜底数据） ──
+HOLIDAY_CACHE   = "/tmp/holiday_cache.json"
+HOLIDAY_ICS_URL = "https://calendars.icloud.com/holidays/cn_zh.ics/"
+HOLIDAY_TTL_DAYS = 30          # 缓存有效期（天）
+
+# 兜底硬编码（ICS 获取失败时使用）
+HOLIDAYS: dict = {
+    (2025,  1,  1): "元旦",
+    (2025,  1, 28): "春节", (2025,  1, 29): "春节", (2025,  1, 30): "春节",
+    (2025,  1, 31): "春节", (2025,  2,  1): "春节", (2025,  2,  2): "春节",
+    (2025,  2,  3): "春节", (2025,  2,  4): "春节",
+    (2025,  4,  4): "清明", (2025,  4,  5): "清明", (2025,  4,  6): "清明",
+    (2025,  5,  1): "劳动", (2025,  5,  2): "劳动", (2025,  5,  3): "劳动",
+    (2025,  5,  4): "劳动", (2025,  5,  5): "劳动",
+    (2025,  5, 31): "端午", (2025,  6,  1): "端午", (2025,  6,  2): "端午",
+    (2025, 10,  1): "国庆", (2025, 10,  2): "国庆", (2025, 10,  3): "国庆",
+    (2025, 10,  4): "国庆", (2025, 10,  5): "国庆", (2025, 10,  6): "国庆",
+    (2025, 10,  7): "国庆", (2025, 10,  8): "国庆",
+    (2026,  1,  1): "元旦",
+    (2026,  2, 17): "春节", (2026,  2, 18): "春节", (2026,  2, 19): "春节",
+    (2026,  2, 20): "春节", (2026,  2, 21): "春节", (2026,  2, 22): "春节",
+    (2026,  2, 23): "春节",
+    (2026,  4,  4): "清明", (2026,  4,  5): "清明", (2026,  4,  6): "清明",
+    (2026,  5,  1): "劳动", (2026,  5,  2): "劳动", (2026,  5,  3): "劳动",
+    (2026,  5,  4): "劳动", (2026,  5,  5): "劳动",
+    (2026,  6, 19): "端午", (2026,  6, 20): "端午", (2026,  6, 21): "端午",
+    (2026,  9, 25): "中秋", (2026,  9, 26): "中秋", (2026,  9, 27): "中秋",
+    (2026, 10,  1): "国庆", (2026, 10,  2): "国庆", (2026, 10,  3): "国庆",
+    (2026, 10,  4): "国庆", (2026, 10,  5): "国庆", (2026, 10,  6): "国庆",
+    (2026, 10,  7): "国庆",
+}
+WORKDAY_OVERRIDES: set = {
+    (2025,  1, 26), (2025,  2,  8),
+    (2025,  4, 27),
+    (2025,  9, 28), (2025, 10, 11),
+    (2026,  2, 14), (2026,  2, 28),
+    (2026,  9, 19), (2026, 10, 10),
+}
+
+def fetch_holidays(verbose=False):
+    """下载并解析 iCloud 节假日 ICS，返回解析后的缓存 dict。"""
+    import urllib.request, ssl, gzip as _gzip
+
+    def _p(msg):
+        if verbose: print(msg)
+        log(msg)
+
+    _p(f"[holidays] GET {HOLIDAY_ICS_URL}")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+    req = urllib.request.Request(HOLIDAY_ICS_URL,
+                                 headers={"Accept-Encoding": "gzip",
+                                          "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+        raw = r.read()
+    try:
+        ics = _gzip.decompress(raw).decode("utf-8")
+    except Exception:
+        ics = raw.decode("utf-8", errors="replace")
+    _p(f"[holidays] {len(ics)} chars")
+
+    hols, wdays = {}, []
+    for vevent in re.findall(r'BEGIN:VEVENT([\s\S]*?)END:VEVENT', ics):
+        sm = re.search(r'SUMMARY[^:]*:(.*)',      vevent)
+        dm = re.search(r'DTSTART[^:]*:(\d{8})',   vevent)
+        em = re.search(r'DTEND[^:]*:(\d{8})',     vevent)
+        xm = re.search(r'X-APPLE-SPECIAL-DAY:(.*)', vevent)
+        if not (dm and xm):
+            continue
+        special  = xm.group(1).strip()
+        name     = re.sub(r'[（(][休班][）)]', '',
+                          sm.group(1) if sm else "").strip()
+        s_str    = dm.group(1)
+        e_str    = em.group(1) if em else s_str
+        start    = datetime.date(int(s_str[:4]), int(s_str[4:6]), int(s_str[6:]))
+        end      = datetime.date(int(e_str[:4]), int(e_str[4:6]), int(e_str[6:]))
+        if end == start:
+            end  = start + datetime.timedelta(days=1)
+
+        d = start
+        while d < end:
+            key = f"{d.year},{d.month},{d.day}"
+            if special == "WORK-HOLIDAY":
+                hols[key] = name
+            elif special == "ALTERNATE-WORKDAY":
+                wdays.append(key)
+            d += datetime.timedelta(days=1)
+
+    _p(f"[holidays] {len(hols)} holiday days, {len(wdays)} workday overrides")
+    cache = {"holidays": hols, "workday_overrides": wdays,
+             "fetched": str(datetime.date.today())}
+    with open(HOLIDAY_CACHE, "w") as f:
+        json.dump(cache, f, ensure_ascii=False)
+    return cache
+
+def _apply_holiday_cache(cache):
+    global HOLIDAYS, WORKDAY_OVERRIDES
+    HOLIDAYS = {
+        tuple(int(x) for x in k.split(",")): v
+        for k, v in cache["holidays"].items()
+    }
+    WORKDAY_OVERRIDES = {
+        tuple(int(x) for x in k.split(","))
+        for k in cache.get("workday_overrides", [])
+    }
+
+def load_holidays():
+    """从缓存加载节假日数据（不联网）。"""
+    if os.path.exists(HOLIDAY_CACHE):
+        try:
+            with open(HOLIDAY_CACHE) as f:
+                _apply_holiday_cache(json.load(f))
+            return True
+        except Exception:
+            pass
+    return False
+
+def maybe_refresh_holidays():
+    """缓存超过 TTL 则重新抓取（调用前 WiFi 应已开启）。"""
+    today = datetime.date.today()
+    if os.path.exists(HOLIDAY_CACHE):
+        try:
+            with open(HOLIDAY_CACHE) as f:
+                cache = json.load(f)
+            fetched = datetime.date.fromisoformat(
+                cache.get("fetched", "2000-01-01"))
+            if (today - fetched).days < HOLIDAY_TTL_DAYS:
+                _apply_holiday_cache(cache)
+                return
+        except Exception:
+            pass
+    try:
+        _apply_holiday_cache(fetch_holidays())
+    except Exception as e:
+        log(f"holiday refresh failed: {e}")
+
+# ── 老黄历（每日抓取一次） ───────────────────────────────
+ALMANAC_CACHE = "/tmp/almanac_cache.json"
+ALMANAC_BASE  = "https://wannianli.tianqi.com/laohuangli/"
+
+def fetch_almanac(target_date=None, verbose=False):
+    """抓取并解析老黄历宜忌，保存缓存并返回 dict。"""
+    import urllib.request, ssl
+
+    if target_date is None:
+        target_date = local_now().date()
+
+    def _p(msg):
+        if verbose: print(msg)
+        log(msg)
+
+    url = ALMANAC_BASE + target_date.strftime("%Y%m%d") + "/"
+    _p(f"[almanac] GET {url}")
+    req = urllib.request.Request(url, headers={
+        "User-Agent":      ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer":         "https://wannianli.tianqi.com/",
+    })
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+        html = r.read().decode("utf-8", errors="replace")
+    _p(f"[almanac] {len(html)} bytes")
+
+    yi, ji = [], []
+    for block in re.findall(r'<ul class="yi_ji_right">([\s\S]*?)</ul>', html):
+        items = re.findall(r'<li>([^<]+)</li>', block)
+        if 'class="yi"' in block:
+            yi = items
+        elif 'class="ji"' in block:
+            ji = items
+
+    _p(f"[almanac] 宜:{len(yi)} 忌:{len(ji)}")
+    cache = {"date": str(target_date), "yi": yi, "ji": ji}
+    with open(ALMANAC_CACHE, "w") as f:
+        json.dump(cache, f, ensure_ascii=False)
+    return cache
+
+def load_almanac():
+    if os.path.exists(ALMANAC_CACHE):
+        try:
+            return json.load(open(ALMANAC_CACHE))
+        except Exception:
+            pass
+    return {"date": "", "yi": [], "ji": []}
+
+def maybe_refresh_almanac():
+    """日期变化时重新抓取（调用前 WiFi 已开启）。"""
+    today = str(local_now().date())
+    if load_almanac().get("date") == today:
+        return
+    try:
+        fetch_almanac()
+    except Exception as e:
+        log(f"almanac refresh failed: {e}")
+
+# ── 工具 ────────────────────────────────────────────────
 def local_now():
     return datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+
+def log(msg):
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(f"[{local_now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 
 def eips_msg(line1, line2="", line3=""):
     subprocess.run(["eips", "-c"])
@@ -13,281 +346,397 @@ def eips_msg(line1, line2="", line3=""):
     if line2: subprocess.run(["eips", "5", "10", line2])
     if line3: subprocess.run(["eips", "5", "12", line3])
 
-def log(msg):
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{local_now().strftime('%H:%M:%S')}] {msg}\n")
+def display_image(path):
+    subprocess.run(["eips", "-g", path])
 
-eips_msg("Clock starting...", "Please wait.")
-log("=== clock.py started ===")
-
-try:
-    from PIL import Image, ImageDraw, ImageFont
-    log("Pillow OK")
-except ImportError:
-    eips_msg("Installing Pillow...", "WiFi required.", "This may take 1-2 min.")
-    log("Pillow not found, installing...")
-    result = subprocess.run(
-        ["/mnt/us/python3/bin/pip3", "install", "pillow"],
-        capture_output=True, text=True
-    )
-    log(f"pip3: {result.stdout[-200:]} {result.stderr[-200:]}")
-    if result.returncode != 0:
-        eips_msg("Pillow install FAILED.", "Check WiFi & clock.log.")
-        sys.exit(1)
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        log("Pillow installed OK")
-    except ImportError as e:
-        eips_msg("Pillow import failed.", str(e)[:40])
-        sys.exit(1)
-
-LAT        = 22.5431
-LON        = 114.0579
-CITY_CN    = "深圳"
-QWEATHER_KEY = ""
-WEATHER_INTERVAL = 30
-WEATHER_CACHE    = "/tmp/weather_cache.json"
-SCREEN_W, SCREEN_H = 758, 1024
-FONT_PATH  = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
-WEEKDAYS   = ["一", "二", "三", "四", "五", "六", "日"]
-
-WMO_MAP = {
-    0:("晴","sun"),1:("晴","sun"),2:("多云","partly_cloudy"),3:("阴","cloud"),
-    45:("雾","fog"),48:("冻雾","fog"),
-    51:("小毛雨","drizzle"),53:("中毛雨","drizzle"),55:("大毛雨","drizzle"),
-    56:("小冻毛雨","drizzle"),57:("大冻毛雨","drizzle"),
-    61:("小雨","rain"),63:("中雨","rain"),65:("大雨","rain"),
-    66:("小冻雨","rain"),67:("大冻雨","rain"),
-    71:("小雪","snow"),73:("中雪","snow"),75:("大雪","snow"),77:("米雪","snow"),
-    80:("小阵雨","shower"),81:("中阵雨","shower"),82:("大阵雨","shower"),
-    85:("小阵雪","snow"),86:("大阵雪","snow"),
-    95:("雷阵雨","thunder"),96:("雷雨夹冰雹","thunder"),99:("强雷雨夹冰雹","thunder"),
-}
-SEVERE_KEYWORDS = {"暴雨","暴风雪","冰雹","强雷雨","大阵雨","大雨","大雪"}
-
+# ── WiFi / NTP / 防锁屏 ─────────────────────────────────
 def wifi_on():
-    subprocess.run(["lipc-set-prop","com.lab126.wifid","enable","1"],capture_output=True)
+    subprocess.run(["lipc-set-prop", "com.lab126.wifid", "enable", "1"],
+                   capture_output=True)
     time.sleep(5)
 
 def wifi_off():
-    subprocess.run(["lipc-set-prop","com.lab126.wifid","enable","0"],capture_output=True)
-
-def sync_time():
-    subprocess.run(["ntpdate","-u","pool.ntp.org"],capture_output=True)
-
-def fetch_weather():
-    try:
-        import urllib.request, ssl
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        url = (f"https://api.open-meteo.com/v1/forecast"
-               f"?latitude={LAT}&longitude={LON}"
-               f"&current=temperature_2m,weather_code"
-               f"&timezone=Asia%2FShanghai&forecast_days=1")
-        with urllib.request.urlopen(url, timeout=10, context=ctx) as r:
-            data = json.loads(r.read())
-        cur  = data["current"]
-        temp = round(cur["temperature_2m"])
-        code = int(cur["weather_code"])
-        desc_cn, icon_type = WMO_MAP.get(code, ("未知","sun"))
-        warning = ""
-        if QWEATHER_KEY:
-            try:
-                wurl = (f"https://devapi.qweather.com/v7/warning/now"
-                        f"?location={LON},{LAT}&key={QWEATHER_KEY}")
-                with urllib.request.urlopen(wurl, timeout=8, context=ctx) as wr:
-                    wdata = json.loads(wr.read())
-                if wdata.get("warning"):
-                    w = wdata["warning"][0]
-                    warning = f"[预警] {w.get('typeName','')} {w.get('level','')}级"
-            except Exception as we:
-                log(f"warning fetch failed: {we}")
-        is_severe = any(kw in desc_cn for kw in SEVERE_KEYWORDS)
-        cache = {"text":f"{CITY_CN}  {temp}°C  {desc_cn}","icon":icon_type,
-                 "severe":is_severe,"warning":warning}
-        with open(WEATHER_CACHE,"w") as f:
-            json.dump(cache, f, ensure_ascii=False)
-        log(f"weather OK: {cache['text']}")
-        return cache
-    except Exception as e:
-        log(f"weather fetch failed: {e}")
-        if os.path.exists(WEATHER_CACHE):
-            try:
-                return json.load(open(WEATHER_CACHE))
-            except Exception:
-                pass
-        return {"text":"天气暂不可用","icon":"sun","severe":False,"warning":""}
-
-def _cloud(draw,cx,cy,s):
-    draw.ellipse([cx-s,cy-s//3,cx+s//2,cy+s//2],fill=160,outline=0,width=1)
-    draw.ellipse([cx-s//2,cy-s*3//4,cx+s//5,cy+s//4],fill=160,outline=0,width=1)
-    draw.ellipse([cx-s//5,cy-s//2,cx+s*2//3,cy+s//4],fill=160,outline=0,width=1)
-
-def _sun(draw,cx,cy,s):
-    r=s*10//22
-    draw.ellipse([cx-r,cy-r,cx+r,cy+r],outline=0,width=2)
-    for i in range(8):
-        a=i*math.pi/4
-        draw.line([int(cx+(r+3)*math.cos(a)),int(cy+(r+3)*math.sin(a)),
-                   int(cx+(r+9)*math.cos(a)),int(cy+(r+9)*math.sin(a))],fill=0,width=2)
-
-def _rain_drops(draw,cx,cy,s):
-    for dx in [-s//2,0,s//2]:
-        draw.line([cx+dx,cy,cx+dx-3,cy+s*3//4],fill=0,width=2)
-
-def _snow_flakes(draw,cx,cy,s):
-    for dx in [-s//2,0,s//2]:
-        x,y=cx+dx,cy+s//4
-        for a in [0,math.pi/3,math.pi*2/3]:
-            draw.line([int(x-5*math.cos(a)),int(y-5*math.sin(a)),
-                       int(x+5*math.cos(a)),int(y+5*math.sin(a))],fill=0,width=1)
-
-def draw_weather_icon(draw,cx,cy,icon_type,s=22):
-    if icon_type=="sun":
-        _sun(draw,cx,cy,s)
-    elif icon_type=="partly_cloudy":
-        _sun(draw,cx+s//3,cy-s//3,s*14//22)
-        _cloud(draw,cx-s//5,cy+s//5,s*16//22)
-    elif icon_type=="cloud":
-        _cloud(draw,cx,cy,s)
-    elif icon_type=="fog":
-        for dy in [-s//2,-s//6,s//6,s//2]:
-            w=s-abs(dy)//2
-            draw.line([cx-w,cy+dy,cx+w,cy+dy],fill=80,width=3)
-    elif icon_type in ("rain","shower"):
-        _cloud(draw,cx,cy-s//4,s)
-        _rain_drops(draw,cx,cy+s//4,s)
-    elif icon_type=="drizzle":
-        _cloud(draw,cx,cy-s//4,s)
-        for dx in [-s//3,s//3]:
-            draw.line([cx+dx,cy+s//4,cx+dx-2,cy+s//2],fill=80,width=1)
-    elif icon_type=="snow":
-        _cloud(draw,cx,cy-s//4,s)
-        _snow_flakes(draw,cx,cy+s//4,s)
-    elif icon_type=="thunder":
-        _cloud(draw,cx,cy-s//4,s)
-        pts=[(cx+4,cy-s//4),(cx-4,cy+s//8),(cx+2,cy+s//8),(cx-6,cy+s*2//3)]
-        draw.line(pts,fill=0,width=3)
-    else:
-        _sun(draw,cx,cy,s)
-
-def draw_warning_badge(draw,cx,cy,s=18):
-    h=int(s*1.73)
-    pts=[(cx,cy-h*2//3),(cx-s,cy+h//3),(cx+s,cy+h//3)]
-    draw.polygon(pts,outline=0,fill=40,width=2)
-    draw.line([cx,cy-h//3,cx,cy+h//6],fill=255,width=3)
-    draw.ellipse([cx-2,cy+h//4,cx+2,cy+h//3+2],fill=255)
-
-def draw_centered(draw,y,text,font,fill=0):
-    bbox=draw.textbbox((0,0),text,font=font)
-    x=(SCREEN_W-(bbox[2]-bbox[0]))//2
-    draw.text((x,y),text,fill=fill,font=font)
-    return bbox[3]-bbox[1]
-
-def draw_calendar(draw,top_y,now,font_cal,font_small):
-    year,month,today=now.year,now.month,now.day
-    cal=calendar.monthcalendar(year,month)
-    draw_centered(draw,top_y,f"{year} 年 {month} 月",font_small)
-    y=top_y+48
-    draw_centered(draw,y,"  ".join(WEEKDAYS),font_cal,fill=80)
-    y+=42
-    cell_w=SCREEN_W//7
-    for week in cal:
-        x=0
-        for day in week:
-            if day!=0:
-                ds=f"{day:2d}"
-                bb=draw.textbbox((0,0),ds,font=font_cal)
-                tx=x+(cell_w-(bb[2]-bb[0]))//2
-                if day==today:
-                    draw.rectangle([tx-6,y-3,tx+(bb[2]-bb[0])+6,y+(bb[3]-bb[1])+3],
-                                   outline=0,width=2)
-                draw.text((tx,y),ds,fill=0,font=font_cal)
-            x+=cell_w
-        y+=40
-    return y
-
-def render(weather):
-    now=local_now()
-    img=Image.new("L",(SCREEN_W,SCREEN_H),255)
-    draw=ImageDraw.Draw(img)
-    ft=ImageFont.truetype(FONT_PATH,160)
-    fd=ImageFont.truetype(FONT_PATH,52)
-    fw=ImageFont.truetype(FONT_PATH,44)
-    fc=ImageFont.truetype(FONT_PATH,36)
-    fs=ImageFont.truetype(FONT_PATH,38)
-    fwarn=ImageFont.truetype(FONT_PATH,28)
-
-    y=80
-    draw_centered(draw,y,now.strftime("%H:%M"),ft)
-    y+=185
-    draw_centered(draw,y,now.strftime("%Y年%m月%d日"),fd)
-    y+=68
-    draw_centered(draw,y,"星期"+WEEKDAYS[now.weekday()],fw,fill=60)
-    y+=72
-    draw.line([(60,y),(SCREEN_W-60,y)],fill=180,width=1)
-    y+=22
-    y=draw_calendar(draw,y,now,fc,fs)
-    y+=12
-    draw.line([(60,y),(SCREEN_W-60,y)],fill=180,width=1)
-    y+=18
-
-    wtext=weather.get("text","天气暂不可用")
-    wicon=weather.get("icon","sun")
-    severe=weather.get("severe",False)
-    warning=weather.get("warning","")
-    show_badge=severe or bool(warning)
-    icon_s=22
-    icon_cy=y+icon_s+4
-    text_y=y+4
-    tb=draw.textbbox((0,0),wtext,font=fs)
-    tw=tb[2]-tb[0]
-    badge_w=(icon_s*2+8) if show_badge else 0
-    total_w=badge_w+icon_s*2+12+tw
-    sx=(SCREEN_W-total_w)//2
-    if show_badge:
-        draw_warning_badge(draw,sx+icon_s,icon_cy,icon_s)
-        sx+=icon_s*2+8
-    draw_weather_icon(draw,sx+icon_s,icon_cy,wicon,icon_s)
-    draw.text((sx+icon_s*2+12,text_y),wtext,fill=60,font=fs)
-    if warning:
-        y+=icon_s*2+14
-        draw_centered(draw,y,warning,fwarn,fill=40)
-
-    img.save("/tmp/clock.png")
-    subprocess.run(["eips","-g","/tmp/clock.png"])
-
-def prevent_sleep():
-    subprocess.run(["lipc-set-prop","com.lab126.powerd","preventScreenSaver","1"],
+    subprocess.run(["lipc-set-prop", "com.lab126.wifid", "enable", "0"],
                    capture_output=True)
 
+def sync_time():
+    subprocess.run(["ntpdate", "-u", "pool.ntp.org"], capture_output=True)
+
+def prevent_sleep():
+    subprocess.run(["lipc-set-prop", "com.lab126.powerd", "preventScreenSaver", "1"],
+                   capture_output=True)
+
+# ── 天气（抓取 tianqi.com） ──────────────────────────────
+def _current_slot(now):
+    """返回当前时刻所属的刷新档位 (date, hour)，hour ∈ REFRESH_HOURS。"""
+    for h in sorted(REFRESH_HOURS, reverse=True):
+        if now.hour >= h:
+            return (now.date(), h)
+    return (now.date() - datetime.timedelta(days=1), max(REFRESH_HOURS))
+
+def fetch_weather(verbose=False):
+    import urllib.request, ssl
+
+    def _print(msg):
+        if verbose:
+            print(msg)
+        log(msg)
+
+    url = f"https://www.tianqi.com/{CITY_SLUG}/"
+    _print(f"[fetch] GET {url}")
+    req = urllib.request.Request(url, headers={
+        "User-Agent":      ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/124.0.0.0 Safari/537.36"),
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept-Encoding": "identity",
+        "Referer":         "https://www.tianqi.com/",
+        "Connection":      "close",
+    })
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+
+    with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
+        html = r.read().decode("utf-8", errors="replace")
+
+    _print(f"[fetch] response {len(html)} bytes")
+    if len(html) < 500:
+        raise ValueError(f"response too short ({len(html)} bytes), possible block")
+
+    # ── 天气描述 + 温度 ──────────────────────────────────
+    weather_text = f"{CITY_CN}  天气暂不可用"
+    m = re.search(r'<dd[^>]*class=["\']weather["\'][^>]*>([\s\S]*?)</dd>', html)
+    if m:
+        block = m.group(1)
+        _print(f"[parse] weather block: {block[:200]!r}")
+        spans = re.findall(r'<span[^>]*><b[^>]*>(.*?)</b>(.*?)</span>', block, re.DOTALL)
+        _print(f"[parse] spans found: {spans}")
+        if spans:
+            desc = re.sub(r'<[^>]+>', '', spans[0][0]).strip()
+            rest = re.sub(r'<[^>]+>', '', spans[0][1]).strip()
+            temp = rest
+            if len(spans) > 1:
+                t2 = re.sub(r'<[^>]+>', '',
+                            spans[1][0] + spans[1][1]).strip()
+                if t2:
+                    temp = t2
+            parts = [p for p in [desc, temp] if p]
+            if parts:
+                weather_text = f"{CITY_CN}  {'  '.join(parts)}"
+    else:
+        _print("[parse] weather block NOT found — regex miss, site may have changed")
+
+    _print(f"[parse] weather_text = {weather_text!r}")
+
+    # ── 日出 / 日落 ──────────────────────────────────────
+    sunrise, sunset = "", ""
+    m2 = re.search(r'日出[：:]\s*([\d:]+)\s*<br\s*/?>\s*日落[：:]\s*([\d:]+)', html)
+    if m2:
+        sunrise = m2.group(1).strip()
+        sunset  = m2.group(2).strip()
+        _print(f"[parse] sunrise={sunrise!r} sunset={sunset!r}")
+    else:
+        _print("[parse] sunrise/sunset NOT found")
+
+    cache = {
+        "text":    weather_text,
+        "sunrise": sunrise,
+        "sunset":  sunset,
+        "severe":  False,
+        "warning": "",
+    }
+    with open(WEATHER_CACHE, "w") as f:
+        json.dump(cache, f, ensure_ascii=False)
+    _print(f"[fetch] cache written to {WEATHER_CACHE}")
+    log(f"weather OK: {weather_text!r}  ↑{sunrise} ↓{sunset}")
+    return cache
+
+def load_weather():
+    if os.path.exists(WEATHER_CACHE):
+        try:
+            return json.load(open(WEATHER_CACHE))
+        except Exception:
+            pass
+    return {"text": f"{CITY_CN}  天气暂不可用", "sunrise": "",
+            "sunset": "", "severe": False, "warning": ""}
+
+def maybe_refresh_weather(now, last_slot):
+    slot = _current_slot(now)
+    if DEBUG_MODE and os.path.exists(WEATHER_CACHE):
+        return load_weather(), slot
+    if last_slot == slot:
+        return load_weather(), last_slot
+    try:
+        wifi_on()
+        sync_time()
+        w = fetch_weather()
+        maybe_refresh_holidays()
+        maybe_refresh_almanac()
+        wifi_off()
+        return w, slot
+    except Exception as e:
+        log(f"weather error: {e}")
+        wifi_off()
+        return load_weather(), slot
+
+# ── 老黄历排版 ──────────────────────────────────────────
+def _text_size(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0], bb[3] - bb[1], bb
+
+def _draw_round_rect(draw, box, radius, outline=0, fill=255, width=1):
+    """兼容旧版 Pillow 的圆角矩形绘制。"""
+    try:
+        draw.rounded_rectangle(box, radius=radius, outline=outline,
+                               fill=fill, width=width)
+        return
+    except AttributeError:
+        pass
+
+    x1, y1, x2, y2 = box
+    draw.rectangle([x1 + radius, y1, x2 - radius, y2], fill=fill)
+    draw.rectangle([x1, y1 + radius, x2, y2 - radius], fill=fill)
+    draw.pieslice([x1, y1, x1 + radius * 2, y1 + radius * 2],
+                  180, 270, fill=fill)
+    draw.pieslice([x2 - radius * 2, y1, x2, y1 + radius * 2],
+                  270, 360, fill=fill)
+    draw.pieslice([x1, y2 - radius * 2, x1 + radius * 2, y2],
+                  90, 180, fill=fill)
+    draw.pieslice([x2 - radius * 2, y2 - radius * 2, x2, y2],
+                  0, 90, fill=fill)
+    draw.arc([x1, y1, x1 + radius * 2, y1 + radius * 2], 180, 270,
+             fill=outline, width=width)
+    draw.arc([x2 - radius * 2, y1, x2, y1 + radius * 2], 270, 360,
+             fill=outline, width=width)
+    draw.arc([x1, y2 - radius * 2, x1 + radius * 2, y2], 90, 180,
+             fill=outline, width=width)
+    draw.arc([x2 - radius * 2, y2 - radius * 2, x2, y2], 0, 90,
+             fill=outline, width=width)
+    draw.line([x1 + radius, y1, x2 - radius, y1], fill=outline, width=width)
+    draw.line([x1 + radius, y2, x2 - radius, y2], fill=outline, width=width)
+    draw.line([x1, y1 + radius, x1, y2 - radius], fill=outline, width=width)
+    draw.line([x2, y1 + radius, x2, y2 - radius], fill=outline, width=width)
+
+def draw_almanac_section(draw, y, title, items, font, max_w):
+    """绘制一组老黄历标签，全部项目按宽度自动换行。"""
+    if not items:
+        return y
+
+    left_x = 30
+    right_x = left_x + max_w
+    marker = 30
+    gap = 8
+    row_gap = 8
+    pill_h = 26
+    pill_pad_x = 12
+    tag_x0 = left_x + marker + 12
+    x = tag_x0
+    row_y = y
+
+    draw.ellipse([left_x, row_y, left_x + marker, row_y + marker],
+                 outline=0, width=2)
+    tw, th, tb = _text_size(draw, title, font)
+    draw.text((left_x + (marker - tw) // 2 - tb[0],
+               row_y + (marker - th) // 2 - tb[1]),
+              title, fill=0, font=font)
+
+    for item in items:
+        tw, th, tb = _text_size(draw, item, font)
+        pill_w = tw + pill_pad_x * 2
+        if x > tag_x0 and x + pill_w > right_x:
+            x = tag_x0
+            row_y += pill_h + row_gap
+
+        _draw_round_rect(draw, [x, row_y, x + pill_w, row_y + pill_h],
+                         radius=pill_h // 2, outline=0, fill=255, width=1)
+        draw.text((x + pill_pad_x - tb[0],
+                   row_y + (pill_h - th) // 2 - tb[1]),
+                  item, fill=40, font=font)
+        x += pill_w + gap
+
+    return row_y + pill_h + 10
+
+# ── 日历绘制 ────────────────────────────────────────────
+def draw_centered(draw, y, text, font, fill=0):
+    bbox = draw.textbbox((0, 0), text, font=font)
+    # 减去 bbox[0] 使字形视觉中心对齐屏幕中心
+    x = (SCREEN_W - (bbox[2] - bbox[0])) // 2 - bbox[0]
+    draw.text((x, y), text, fill=fill, font=font)
+    return bbox[3] - bbox[1]
+
+def draw_calendar(draw, top_y, now, font_num, font_hdr, font_lbl):
+    year, month, today = now.year, now.month, now.day
+    cal    = calendar.monthcalendar(year, month)
+    cell_w = SCREEN_W // 7
+    cell_h = 60   # 日期数字 + 下方标签行
+
+    draw_centered(draw, top_y, f"{year} 年 {month} 月", font_hdr)
+    y = top_y + 44
+
+    # 星期表头
+    for i, wd in enumerate(WEEKDAYS):
+        bb = draw.textbbox((0, 0), wd, font=font_hdr)
+        tx = i * cell_w + (cell_w - (bb[2]-bb[0])) // 2 - bb[0]
+        draw.text((tx, y), wd, fill=80, font=font_hdr)
+    y += 36
+
+    for week in cal:
+        for i, day in enumerate(week):
+            if day == 0:
+                continue
+            key        = (year, month, day)
+            is_today   = (day == today)
+            is_holiday = (key in HOLIDAYS) and (key not in WORKDAY_OVERRIDES)
+            is_workday = key in WORKDAY_OVERRIDES
+            hol_name   = HOLIDAYS.get(key, "")
+            term       = solar_term(datetime.date(year, month, day))
+
+            ds = str(day)
+            bb = draw.textbbox((0, 0), ds, font=font_num)
+            tw = bb[2] - bb[0]
+            tx = i * cell_w + (cell_w - tw) // 2 - bb[0]
+
+            gl = tx + bb[0]; gt = y + bb[1]
+            gr = tx + bb[2]; gb = y + bb[3]
+            pad = 4
+
+            if is_holiday:
+                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], fill=210)
+            if is_today:
+                draw.rectangle([gl-pad, gt-pad, gr+pad, gb+pad], outline=0, width=2)
+
+            draw.text((tx, y), ds, fill=0, font=font_num)
+
+            # 标签行：节假日名 > 补班"班" > 节气
+            if is_holiday and hol_name:
+                label, fill = hol_name, 60
+            elif is_workday:
+                label, fill = "班", 80
+            elif term:
+                label, fill = term, 100
+            else:
+                label = ""
+
+            if label:
+                lbb = draw.textbbox((0, 0), label, font=font_lbl)
+                lw  = lbb[2] - lbb[0]
+                lx  = i * cell_w + (cell_w - lw) // 2 - lbb[0]
+                ly  = y + bb[3] + 3
+                draw.text((lx, ly), label, fill=fill, font=font_lbl)
+
+        y += cell_h
+
+    return y
+
+# ── 渲染 ────────────────────────────────────────────────
+def render(weather, out_path="/tmp/clock.png"):
+    from PIL import Image, ImageDraw, ImageFont
+
+    now     = local_now()
+    almanac = load_almanac()
+    img     = Image.new("L", (SCREEN_W, SCREEN_H), 255)
+    draw    = ImageDraw.Draw(img)
+
+    ft   = ImageFont.truetype(FONT_PATH, 155)   # 时间
+    fd   = ImageFont.truetype(FONT_PATH, 50)    # 日期
+    fw   = ImageFont.truetype(FONT_PATH, 36)    # 星期 + 农历
+    fnum = ImageFont.truetype(FONT_PATH, 32)    # 日历数字
+    fhdr = ImageFont.truetype(FONT_PATH, 30)    # 日历标题/表头
+    flbl = ImageFont.truetype(FONT_PATH, 16)    # 节假日/节气标签
+    fwth = ImageFont.truetype(FONT_PATH, 24)    # 天气（顶部小字）
+    falm = ImageFont.truetype(FONT_PATH, 18)    # 老黄历
+
+    # ── 顶部天气（小字）─────────────────────────────────
+    y = 10
+    wtext    = weather.get("text", f"{CITY_CN}  天气暂不可用")
+    sr, ss   = weather.get("sunrise", ""), weather.get("sunset", "")
+    top_line = f"{wtext}    ↑{sr}  ↓{ss}" if (sr and ss) else wtext
+    draw_centered(draw, y, top_line, fwth, fill=80)
+    y += 32
+    draw.line([(60, y), (SCREEN_W-60, y)], fill=180, width=1)
+    y += 14
+
+    # ── 时间 ─────────────────────────────────────────────
+    draw_centered(draw, y, now.strftime("%H:%M"), ft);                    y += 170
+
+    # ── 日期 ─────────────────────────────────────────────
+    draw_centered(draw, y, now.strftime("%Y年%m月%d日"), fd);             y += 65
+
+    # ── 星期 + 农历 + 节气 ───────────────────────────────
+    weekday_s = "星期" + WEEKDAYS[now.weekday()]
+    lunar_s   = lunar_date_str(now.date())
+    term_s    = solar_term(now.date())
+    right_s   = f"{lunar_s}  {term_s}" if (lunar_s and term_s) else (lunar_s or term_s)
+    line3     = f"{weekday_s}    {right_s}" if right_s else weekday_s
+    draw_centered(draw, y, line3, fw, fill=60);                           y += 52
+
+    draw.line([(60, y), (SCREEN_W-60, y)], fill=160, width=1);           y += 20
+
+    # ── 日历 ─────────────────────────────────────────────
+    y = draw_calendar(draw, y, now, fnum, fhdr, flbl);                   y += 8
+    draw.line([(60, y), (SCREEN_W-60, y)], fill=160, width=1);           y += 14
+
+    # ── 老黄历 ───────────────────────────────────────────
+    max_w = SCREEN_W - 60
+    y = draw_almanac_section(draw, y, "宜", almanac.get("yi", []), falm, max_w)
+    y = draw_almanac_section(draw, y + 2, "忌", almanac.get("ji", []), falm, max_w)
+
+    if weather.get("warning"):
+        draw_centered(draw, y + 4, weather["warning"], fwth, fill=40)
+
+    img.save(out_path)
+    return img
+
+# ── 主循环 ───────────────────────────────────────────────
 def main():
-    weather={"text":"正在获取天气...","icon":"sun","severe":False,"warning":""}
-    last_weather_min=-WEATHER_INTERVAL
-    prevent_sleep()  # 启动时立即禁用屏保
+    eips_msg("Clock starting...", "Please wait.")
+    log("=== clock.py started ===")
+
+    try:
+        from PIL import Image
+        log("Pillow OK")
+    except ImportError:
+        eips_msg("Installing Pillow...", "WiFi required.", "This may take 1-2 min.")
+        log("Pillow not found, installing...")
+        result = subprocess.run(
+            ["/mnt/us/python3/bin/pip3", "install", "pillow"],
+            capture_output=True, text=True
+        )
+        log(f"pip3: {result.stdout[-200:]} {result.stderr[-200:]}")
+        if result.returncode != 0:
+            eips_msg("Pillow install FAILED.", "Check WiFi & clock.log.")
+            sys.exit(1)
+        try:
+            from PIL import Image
+            log("Pillow installed OK")
+        except ImportError as e:
+            eips_msg("Pillow import failed.", str(e)[:40])
+            sys.exit(1)
+
+    load_holidays()
+    weather   = load_weather()
+    last_slot = None
+    prevent_sleep()
+
     while True:
         try:
-            now=local_now()
-            elapsed=now.minute+now.hour*60
-            if elapsed-last_weather_min>=WEATHER_INTERVAL or last_weather_min<0:
-                wifi_on()
-                sync_time()
-                weather=fetch_weather()
-                wifi_off()
-                last_weather_min=elapsed
+            now = local_now()
+            weather, last_slot = maybe_refresh_weather(now, last_slot)
             render(weather)
-            prevent_sleep()  # 每分钟刷新一次防锁屏标记
-        except Exception as e:
-            log(f"render error: {traceback.format_exc()}")
-            eips_msg("Clock error:",str(e)[:40],"See clock.log")
+            display_image("/tmp/clock.png")
+            prevent_sleep()
+        except Exception:
+            log(f"loop error: {traceback.format_exc()}")
             time.sleep(10)
-        sleep_sec=60-local_now().second
-        time.sleep(max(sleep_sec,1))
 
-if __name__=="__main__":
+        sleep_sec = 60 - local_now().second
+        time.sleep(max(sleep_sec, 1))
+
+if __name__ == "__main__":
     try:
         main()
     except Exception as e:
         log(f"FATAL: {traceback.format_exc()}")
-        eips_msg("Clock crashed:",str(e)[:40],"See clock.log")
+        eips_msg("Clock crashed:", str(e)[:40], "See clock.log")
