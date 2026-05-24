@@ -16,6 +16,7 @@
 - 全天强制关闭背光（e-ink 无需背光，最大化省电）
 - 夜间（0–6 点）屏幕每 5 分钟刷新一次，降低 CPU 和 e-ink 刷新功耗
 - 防锁屏，持续运行
+- 日志自动截断至最近 200 行，避免占满 Kindle 存储
 
 ## 界面布局
 
@@ -80,8 +81,11 @@ CITY_SLUG      = "shenzhen" # tianqi.com 城市路径
 DEBUG_MODE     = False       # Kindle 生产环境保持 False；本机调试可设 True
 TOP_SAFE_Y     = 34         # 顶部安全距离，避开 Kindle 系统状态栏
 FONT_PATH      = "/mnt/us/fonts/MapleMono-NF-CN-Bold.ttf"
-REFRESH_HOURS  = {6, 12, 18}     # 天气刷新整点（夜间不联网）
+REFRESH_HOURS  = {6, 12, 18}     # 天气刷新整点（0 点不联网，减少夜间功耗）
 BACKLIGHT_PATH = "/sys/class/backlight/max77696-bl/brightness"  # KPW2 背光路径
+WEATHER_CACHE  = "/tmp/weather_cache.json"   # 可改为持久路径（重启后保留缓存）
+HOLIDAY_CACHE  = "/tmp/holiday_cache.json"
+ALMANAC_CACHE  = "/tmp/almanac_cache.json"
 ```
 
 > `preview.py` 会把 `DEBUG_MODE` 设为 `True`，本机预览默认只读缓存；需要联网调试时显式使用 `--fetch` / `--fetch-almanac`。
@@ -143,7 +147,7 @@ python3 preview.py --time 14:32
 1. KUAL → Clock → **停止时钟**
 2. KUAL → Clock → **启动时钟（首次/联网）**
 
-> 排查问题：通过 `;uzb` 挂载 Kindle 后查看 `/extensions/clock/clock.log`
+> 排查问题：通过 `;uzb` 挂载 Kindle 后查看 `/extensions/clock/clock.log`（日志自动截断至最近 200 行）
 
 ## 项目结构
 
@@ -154,7 +158,7 @@ kindle-ink-clock/
 ├── deploy.sh       # 一键部署到 Kindle
 ├── config.xml      # KUAL 扩展描述
 ├── menu.json       # KUAL 菜单
-├── start.sh        # Kindle 端启动脚本
+├── start.sh        # Kindle 端启动脚本（关背光 + nice -n 5 + 启动 clock.py）
 └── fonts/          # 放入字体文件（不入 git）
 ```
 
