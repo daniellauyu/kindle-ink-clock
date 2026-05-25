@@ -300,11 +300,11 @@ def fetch_almanac(target_date=None, verbose=False):
     _p(f"[almanac] {len(html)} bytes")
 
     yi, ji = [], []
-    for block in re.findall(r'<ul class="yi_ji_right">([\s\S]*?)</ul>', html):
+    for tag, block in re.findall(r'(<ul[^>]*yi_ji_right[^>]*>)([\s\S]*?)</ul>', html):
         items = re.findall(r'<li>([^<]+)</li>', block)
-        if 'class="yi"' in block:
+        if 'class="yi"' in tag or 'class="yi"' in block:
             yi = items
-        elif 'class="ji"' in block:
+        elif 'class="ji"' in tag or 'class="ji"' in block:
             ji = items
 
     _p(f"[almanac] 宜:{len(yi)} 忌:{len(ji)}")
@@ -322,7 +322,8 @@ def load_almanac():
         return _almanac_mem
     if os.path.exists(ALMANAC_CACHE):
         try:
-            data = json.load(open(ALMANAC_CACHE))
+            with open(ALMANAC_CACHE) as f:
+                data = json.load(f)
             if isinstance(data, dict):
                 _almanac_mem = data
                 return _almanac_mem
@@ -492,7 +493,8 @@ def load_weather():
                "sunset": "", "severe": False, "warning": ""}
     if os.path.exists(WEATHER_CACHE):
         try:
-            data = json.load(open(WEATHER_CACHE))
+            with open(WEATHER_CACHE) as f:
+                data = json.load(f)
             if isinstance(data, dict):
                 merged = default.copy()
                 merged.update(data)
@@ -832,13 +834,13 @@ def render(weather, out_path="/tmp/clock.png"):
     y_sum  = SCREEN_H - TOP_SAFE_Y - 52
     y_alm  = y + max(0, (y_sum - y - alm_h) // 2)
     y2     = draw_almanac_section(draw, y_alm, "宜", yi, falm, max_w)
-    draw_almanac_section(draw, y2 + 8, "忌", ji, falm, max_w)
+    draw_almanac_section(draw, y2 + (8 if yi else 0), "忌", ji, falm, max_w)
 
     # ── 今日摘要：底部距屏幕边距与顶部天气一致 ──────────────
     draw_today_summary(draw, y_sum, now, fsum, max_w)
 
     if weather.get("warning"):
-        draw_centered(draw, y + 4, weather["warning"], fwth, fill=40)
+        draw_centered(draw, y_sum - 38, weather["warning"], fwth, fill=40)
 
     img.save(out_path, compress_level=1)
     return img
@@ -872,7 +874,7 @@ def main():
     _trim_log()
     load_holidays()
     weather   = load_weather()
-    last_slot = None
+    last_slot = _current_slot(local_now())
     tick      = 0
     apply_backlight()
     prevent_sleep()
@@ -887,10 +889,11 @@ def main():
             weather, last_slot = maybe_refresh_weather(now, last_slot)
             render(weather)
             display_image("/tmp/clock.png")
-            tick += 1
         except Exception:
             log(f"loop error: {traceback.format_exc()}")
             time.sleep(10)
+
+        tick += 1
 
         now2 = local_now()
         if 0 <= now2.hour < 6:
